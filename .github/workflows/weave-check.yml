@@ -36,6 +36,10 @@ jobs:
           git remote add origin "$WORKSPACE_REPO"
           git fetch -q --depth 1 origin "$WORKSPACE_COMMIT" && git checkout -q FETCH_HEAD
           chmod +x gradlew
+      - name: Download the mods listed in mods/modrinth.txt
+        run: |
+          if [ -f mods/modrinth.txt ]; then python3 tools/modrinth.py download 26.2 mods/modrinth.txt mods; fi
+          ls mods
       - name: Set up build-time Fabric
         run: chmod +x loader/weave.sh && loader/weave.sh workspace eml
       - name: Compile the game, weave the mods, compile the rest against them
