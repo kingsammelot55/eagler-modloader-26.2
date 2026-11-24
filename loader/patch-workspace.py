@@ -18,6 +18,9 @@ Usage: patch-workspace.py WORKSPACE
 - ServerFunctionLibrary: mods' datapack functions (.mcfunction) are compiled right away instead of as
   async tasks the loader then waits on, which the browser's single-threaded server can't do (vanilla
   ships no functions, so Eaglercraft never hit this); a function that fails to compile is logged.
+- WebGL2Program: a shader that fails to compile is retried with whole numbers made decimal on the lines
+  the compiler complained about (desktop GLSL turns 1 into 1.0 next to a float; the browser's GLSL ES
+  doesn't, and mods' shaders such as Impact Frames' rely on it). Shaders that compile are untouched.
 - StandaloneTeaVMLinker: classes or methods the browser doesn't have, used by mods, no longer stop the
   build. TeaVM compiles each such spot to throw NoClassDefFoundError/NoSuchMethodError if it runs; the
   build log lists them ("was not found"). Any other compiler error still stops the build.
@@ -165,8 +168,98 @@ def main():
             throw new IllegalStateException("TeaVM reported severe problems");
         }"""
     patch(linker, old, new, "missing-class handling")
+    prog = os.path.join(ws, "platform-teavm/src/main/java/net/lax1dude/eaglercraft/v1_8/internal/webgl2/WebGL2Program.java")
+    old = """		gl.compileShader(shaderId);
+		if (!gl.getShaderParameterb(shaderId, WebGL2Const.GL_COMPILE_STATUS)) {
+			String logInfo = gl.getShaderInfoLog(shaderId);"""
+    new = """		gl.compileShader(shaderId);
+		for (int emlTry = 0; emlTry < 4 && !gl.getShaderParameterb(shaderId, WebGL2Const.GL_COMPILE_STATUS); emlTry++) {
+			// eagler-modloader: GLSL ES has no implicit int-to-float conversion; fix the lines it complained about
+			String emlFixed = emlFloatLiterals(esSource, gl.getShaderInfoLog(shaderId));
+			if (emlFixed == null) break;
+			esSource = emlFixed;
+			gl.shaderSource(shaderId, esSource);
+			gl.compileShader(shaderId);
+			if (gl.getShaderParameterb(shaderId, WebGL2Const.GL_COMPILE_STATUS)) {
+				System.err.println("eagler-webgl2: " + type.getName() + " shader (" + id + ") compiled after making whole numbers decimal");
+			}
+		}
+		if (!gl.getShaderParameterb(shaderId, WebGL2Const.GL_COMPILE_STATUS)) {
+			String logInfo = gl.getShaderInfoLog(shaderId);"""
+    patch(prog, old, new, "shader whole-number retry")
+    append_to_class(prog, """
+	/**
+	 * eagler-modloader: desktop GLSL converts int to float implicitly (1 - x), GLSL ES 3.00 doesn't. For each
+	 * compiler error about an int, the whole-number literals on that line next to the operator it names
+	 * (or all on the line, for a function call or assignment) become float literals; never inside [].
+	 * Null if nothing changed.
+	 */
+	static String emlFloatLiterals(String src, String log) {
+		if (log == null) return null;
+		String[] lines = src.split("\\n", -1);
+		boolean changed = false;
+		for (String err : log.split("\\n")) {
+			if (err.indexOf("int") < 0) continue;
+			int a = err.indexOf("0:");
+			if (a < 0) continue;
+			int b = err.indexOf(':', a + 2);
+			if (b < 0) continue;
+			int ln;
+			try {
+				ln = Integer.parseInt(err.substring(a + 2, b).trim()) - 1;
+			} catch (NumberFormatException e) {
+				continue;
+			}
+			if (ln < 0 || ln >= lines.length || lines[ln].trim().startsWith("#")) continue;
+			String op = null;
+			int q1 = err.indexOf('\\'', b), q2 = q1 < 0 ? -1 : err.indexOf('\\'', q1 + 1);
+			if (q1 >= 0 && q2 > q1) op = err.substring(q1 + 1, q2);
+			boolean whole = err.indexOf("no matching overloaded function") >= 0 || err.indexOf("cannot convert") >= 0;
+			if (!whole && (op == null || op.isEmpty() || "+-*/<>=!".indexOf(op.charAt(0)) < 0)) continue;
+			String fixed = emlFloatLine(lines[ln], whole ? null : op);
+			if (!fixed.equals(lines[ln])) {
+				lines[ln] = fixed;
+				changed = true;
+			}
+		}
+		return changed ? String.join("\\n", lines) : null;
+	}
+
+	private static boolean emlWordChar(char c) {
+		return Character.isLetterOrDigit(c) || c == '_' || c == '.';
+	}
+
+	private static String emlFloatLine(String line, String op) {
+		StringBuilder out = new StringBuilder(line.length() + 8);
+		int depth = 0, n = line.length();
+		for (int i = 0; i < n; i++) {
+			char c = line.charAt(i);
+			if (c == '[') depth++;
+			else if (c == ']') depth--;
+			if (Character.isDigit(c) && (i == 0 || !emlWordChar(line.charAt(i - 1)))) {
+				int j = i;
+				while (j < n && Character.isDigit(line.charAt(j))) j++;
+				out.append(line, i, j);
+				if ((j >= n || !emlWordChar(line.charAt(j))) && depth == 0 && (op == null || emlNextTo(line, i, j, op))) out.append(".0");
+				i = j - 1;
+				continue;
+			}
+			out.append(c);
+		}
+		return out.toString();
+	}
+
+	private static boolean emlNextTo(String line, int i, int j, String op) {
+		int k = i - 1;
+		while (k >= 0 && line.charAt(k) == ' ') k--;
+		if (k - op.length() + 1 >= 0 && line.startsWith(op, k - op.length() + 1)) return true;
+		k = j;
+		while (k < line.length() && line.charAt(k) == ' ') k++;
+		return line.startsWith(op, k);
+	}
+""", "static String emlFloatLiterals(", "shader whole-number helper")
     print("workspace: ServiceLoader.findFirst, Reader.transferTo, Array setters, Files.newDirectoryStream, glfwGetMouseButton,"
-          " datapack functions; mods' missing classes don't stop the build")
+          " datapack functions, shader whole numbers; mods' missing classes don't stop the build")
 
 
 if __name__ == "__main__":
