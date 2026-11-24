@@ -21,7 +21,7 @@ import net.fabricmc.loader.api.metadata.ModOrigin;
  * (.eml-mods/<mod id>/<version>/...) the first time it's asked for, so mods can read it as a normal Path.
  * getRootPaths() is empty for most mods: their files can be looked up but not listed. A mod with files
  * in folders (built-in resource packs, for example; merge-assets.py lists them in .eml-files) gets
- * those unpacked there the first time it asks, and that folder as its root path, so Fabric can list
+ * those unpacked to .eml-mods/<mod id>/<version>-files the first time it asks, and that folder as its root path, so Fabric can list
  * and read them (ResourceLoader.registerBuiltinPack walks the root path).
  */
 public final class EmlModContainer implements ModContainer {
@@ -44,12 +44,25 @@ public final class EmlModContainer implements ModContainer {
 			rootPaths = Collections.emptyList();
 			byte[] list = GeneratedMods.resource("eml-mods/" + metadata.getId() + "/.eml-files");
 			if (list != null) {
+				// Its own folder, apart from findPath()'s cache: that also holds game assets and data looked up
+				// through this mod (Fabric's client tags ask every mod), which would make it look like a data pack.
+				Path root = Paths.get(".eml-mods", metadata.getId(), metadata.getVersion().getFriendlyString() + "-files");
 				int missing = 0;
 				for (String name : new String(list, java.nio.charset.StandardCharsets.UTF_8).split("\n")) {
-					if (!name.isEmpty() && !findPath(name).isPresent()) missing++;
+					if (name.isEmpty() || name.contains("..")) continue;
+					Path out = root.resolve(name);
+					if (Files.isRegularFile(out)) continue;
+					byte[] data = GeneratedMods.resource("eml-mods/" + metadata.getId() + "/" + name);
+					try {
+						if (data == null) throw new IOException("not packed");
+						Files.createDirectories(out.getParent());
+						Files.write(out, data);
+					} catch (IOException | RuntimeException e) {
+						missing++;
+					}
 				}
 				if (missing > 0) System.err.println("[eagler-modloader] " + missing + " files of " + metadata.getId() + " could not be unpacked");
-				rootPaths = Collections.singletonList(getRootPath());
+				rootPaths = Collections.singletonList(root);
 			}
 		}
 		return rootPaths;
