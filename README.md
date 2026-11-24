@@ -1,5 +1,5 @@
 # eagler-modloader-26.2
-
+[![Build Eaglercraft 26.2](https://github.com/kingsammelot55/eagler-modloader-26.2/actions/workflows/build.yml/badge.svg)](https://github.com/kingsammelot55/eagler-modloader-26.2/actions/workflows/build.yml)
 **Work in progress.** Fabric mods, built into Eaglercraft 26.2.
 
 Eaglercraft is Minecraft compiled to run in a web browser. A browser can't load a mod `.jar` while the game is running: the game is no longer Java code once it is in the browser. So this project does what Fabric does at startup **once, during the build**. It takes the Fabric mods in [`mods/`](mods), applies them to the game, and compiles one standalone HTML file with those mods built in. Mod Menu lists them in-game.
