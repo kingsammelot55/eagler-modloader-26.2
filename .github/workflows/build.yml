@@ -1,9 +1,16 @@
 name: Build Eaglercraft 26.2
 
+# Builds Eaglercraft 26.2 with the Fabric mods in mods/ built in, as one standalone HTML file.
+# loader/weave.sh hooks build-time Fabric into the workspace's Gradle build; see the README.
+#
+# Test builds (every push that changes mods/ loader/ addons/ tools/, and manual runs): faster, lighter
+# compression, published as a pre-release. Release builds (push a tag like v1.0, or a manual run with
+# "release" ticked): maximum compression, published as a normal release.
+# Diagnostic builds (manual run with "diagnostic" ticked): readable names in crash reports, draft release.
+
 on:
   push:
     branches: [main]
-    # added: the workflow itself and tools/ (modrinth.py) also affect the output
     paths: ["mods/**", "loader/**", "addons/**", "tools/**", ".github/workflows/build.yml"]
     tags: ["v*"]
   workflow_dispatch:
@@ -20,13 +27,14 @@ on:
 permissions:
   contents: write
 
-# Per-ref group: a newer push to main cancels an older still-running test build,
-# but tag/release builds are never cancelled.
+# A newer push cancels an older still-running TEST build on the same ref.
+# Tag builds and manual release builds are never cancelled.
 concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+  group: build-${{ github.ref }}-${{ (startsWith(github.ref, 'refs/tags/v') || inputs.release == true) && 'release' || 'test' }}
+  cancel-in-progress: ${{ !(startsWith(github.ref, 'refs/tags/v') || inputs.release == true) }}
 
 env:
+  # The Eaglercraft 26.2 workspace is downloaded at build time and never committed here.
   WORKSPACE_REPO: https://github.com/kingjoeishere/Eaglercraft-26.2-Workspace
   WORKSPACE_COMMIT: f73bff91f0f0840bc958c09ab536dbba1e146b2e
   MC_VERSION: "26.2"
@@ -34,12 +42,12 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest   # public repos: 4 cores, 16 GB RAM
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
 
-      # Free disk + swap first (no dependencies), so later steps never run short.
+      # Free disk + swap first so later steps never run short.
       - name: Free disk space and add swap
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
@@ -57,7 +65,7 @@ jobs:
         with:
           node-version: 20
 
-      # ---- Caches (keyed on the pinned workspace commit + loader changes) ----
+      # ---- Caches ----
       - name: Cache Gradle (wrapper + dependencies)
         uses: actions/cache@v4
         with:
@@ -97,13 +105,30 @@ jobs:
           git fetch -q --depth 1 origin "$WORKSPACE_COMMIT"
           git checkout -q FETCH_HEAD
           chmod +x gradlew
+          # Gradle itself is downloaded on first use; retry, since that download sometimes times out
           for i in 1 2 3 4 5; do ./gradlew --version >/dev/null && break; echo "Gradle download failed (try $i), retrying"; sleep $((i * 20)); done
+
+      # Restored AFTER the workspace checkout so the incremental Gradle state lands inside it.
+      # Lets Gradle reuse compiled output from the previous build instead of recompiling the game.
+      - name: Cache workspace build outputs
+        uses: actions/cache@v4
+        with:
+          path: |
+            workspace/.gradle
+            workspace/**/build
+            !workspace/node_modules/**
+            !workspace/**/node_modules/**
+          key: wsbuild-${{ env.WORKSPACE_COMMIT }}-${{ hashFiles('mods/**', 'loader/**') }}
+          restore-keys: |
+            wsbuild-${{ env.WORKSPACE_COMMIT }}-
 
       - name: Download the mods listed in mods/modrinth.txt
         run: |
           if [ -f mods/modrinth.txt ]; then python3 tools/modrinth.py download "$MC_VERSION" mods/modrinth.txt mods; fi
           ls mods
 
+      # Quick checks first, so a mod that can't work stops the build in minutes instead of after the
+      # long browser compile.
       - name: "Check the mods: can each jar be built in? (seconds)"
         run: |
           mkdir -p eml
@@ -113,8 +138,7 @@ jobs:
       - name: Set up build-time Fabric
         run: chmod +x loader/weave.sh && loader/weave.sh workspace eml
 
-      # Daemon is fine for these two short steps: avoids a cold JVM + config phase each time.
-      # It is stopped before the memory-hungry browser build.
+      # Gradle daemon is fine for the short steps (warm JVM). It is stopped before the big build.
       - name: "Check the mods: apply them to the game (a few minutes)"
         working-directory: workspace
         run: ./gradlew --console=plain :game:compileJava
@@ -141,6 +165,7 @@ jobs:
           fi
           cd workspace
           mkdir -p target_teavm/build/web
+          # the workspace's own EPK packager, run the way its assets.epk task runs it (desktop platform)
           cat > ../eml/epk.init.gradle <<'EOF2'
           allprojects {
             afterEvaluate { p ->
@@ -171,18 +196,24 @@ jobs:
           unzip -o -q "$JAR" org/teavm/model/transformation/NullCheckInsertion.class org/teavm/vm/TeaVM.class org/teavm/dependency/ReferenceResolver.class
           java -cp "$DEPS:." PatchTeaVM org/teavm/model/transformation/NullCheckInsertion.class org/teavm/vm/TeaVM.class org/teavm/dependency/ReferenceResolver.class
           jar uf "$JAR" org/teavm/model/transformation/NullCheckInsertion.class org/teavm/vm/TeaVM.class org/teavm/dependency/ReferenceResolver.class
-          [ -s ~/.cache/teavm-classlib.jar ] || curl -fsSL --retry 5 -o ~/.cache/teavm-classlib.jar https://repo1.maven.org/maven2/org/teavm/teavm-classlib/0.13.1/teavm-classlib-0.13.1.jar
+          # TeaVM's classlib (java.lang.reflect.Constructor/Method, java.nio.file.Files): patched copies go in
+          # Eaglercraft's classlib-override.jar, which every program reads before the stock classlib
+          [ -s ~/.cache/teavm-classlib.jar ] || { mkdir -p ~/.cache; curl -fsSL --retry 5 -o ~/.cache/teavm-classlib.jar https://repo1.maven.org/maven2/org/teavm/teavm-classlib/0.13.1/teavm-classlib-0.13.1.jar; }
           cp ~/.cache/teavm-classlib.jar teavm-classlib.jar
           CL="org/teavm/classlib/java/lang/reflect/TConstructor.class org/teavm/classlib/java/lang/reflect/TMethod.class org/teavm/classlib/java/nio/file/TFiles.class org/teavm/classlib/java/nio/charset/TCharset.class"
           unzip -o -q teavm-classlib.jar $CL
           java -cp "$DEPS:." PatchTeaVM $CL
           jar uf ../../workspace/wasm-toolchain/teavm-eagler-patch/classlib-override.jar $CL
 
+      - name: Memory before the big build
+        run: free -h
+
       - name: Build the standalone HTML
         working-directory: workspace
         env:
           RELEASE: ${{ env.IS_RELEASE }}
-          DIAGNOSTIC: ${{ inputs.diagnostic == true || env.IS_RELEASE != 'true' }}
+          # Diagnostic is now opt-in (manual run with "diagnostic" ticked) so default test builds are faster.
+          DIAGNOSTIC: ${{ inputs.diagnostic == true }}
           EAGLER_BUILD_CAP_MIB: "13312"
           GRADLE_OPTS: "-Dorg.gradle.daemon=false"
         run: |
@@ -191,13 +222,19 @@ jobs:
           if [ "$RELEASE" = "true" ]; then FAST=""; else FAST="--fast-package"; fi
           if [ "$DIAGNOSTIC" = "true" ]; then
             FAST="$FAST --diagnostic"
+            # also keep readable names in the singleplayer server worker's crash reports
             export EAGLER_SERVER_DIAGNOSTIC=1
+            # the workspace only installs a named server build for local debugging; install it here too
             sed -i 's/^  if (diagnostic) {$/  if (false) {/' wasm-toolchain/link-server-standalone.js
             grep -q '^  if (false) {$' wasm-toolchain/link-server-standalone.js
           fi
           node wasm-toolchain/build-single-html.js $FAST --output ../out/eaglercraft-26.2-modded.html
           python3 ../loader/inject-addons.py ../addons ../out/eaglercraft-26.2-modded.html
           grep -v '^#' ../eml/disabled-injectors.txt > ../out/turned-off-injectors.txt 2>/dev/null || true
+
+      - name: Memory after the big build
+        if: always()
+        run: free -h
 
       # Always upload logs (also on failure); shorter retention since releases keep the HTML.
       - name: Upload build
