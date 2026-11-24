@@ -197,19 +197,37 @@ def main():
 	static String emlFloatLiterals(String src, String log) {
 		if (log == null) return null;
 		String[] lines = src.split("\\n", -1);
+		// the line each error names, as an index into lines: #line directives (the game's preprocessor adds
+		// them) set the number of the line after them
+		java.util.Map<String, Integer> at = new java.util.HashMap<>();
+		int num = 1, str = 0;
+		for (int i = 0; i < lines.length; i++) {
+			String t = lines[i].trim();
+			if (t.startsWith("#line")) {
+				String[] w = t.substring(5).trim().split("\\\\s+");
+				try {
+					num = Integer.parseInt(w[0]);
+					if (w.length > 1) str = Integer.parseInt(w[1]);
+					continue;
+				} catch (RuntimeException e) {
+					// not a number: count it as a line
+				}
+			}
+			at.put(str + ":" + num, i);
+			num++;
+		}
 		boolean changed = false;
 		for (String err : log.split("\\n")) {
 			if (err.indexOf("int") < 0) continue;
-			int a = err.indexOf("0:");
+			int a = err.indexOf("ERROR:");
 			if (a < 0) continue;
-			int b = err.indexOf(':', a + 2);
-			if (b < 0) continue;
-			int ln;
-			try {
-				ln = Integer.parseInt(err.substring(a + 2, b).trim()) - 1;
-			} catch (NumberFormatException e) {
-				continue;
-			}
+			int b = err.indexOf(':', a + 6);
+			int c = b < 0 ? -1 : err.indexOf(':', b + 1);
+			if (c < 0) continue;
+			Integer found = at.get(err.substring(a + 6, b).trim() + ":" + err.substring(b + 1, c).trim());
+			if (found == null) continue;
+			int ln = found;
+			b = c;
 			if (ln < 0 || ln >= lines.length || lines[ln].trim().startsWith("#")) continue;
 			String op = null;
 			int q1 = err.indexOf('\\'', b), q2 = q1 < 0 ? -1 : err.indexOf('\\'', q1 + 1);
