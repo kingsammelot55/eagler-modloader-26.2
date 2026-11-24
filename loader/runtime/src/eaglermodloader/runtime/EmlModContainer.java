@@ -19,7 +19,10 @@ import net.fabricmc.loader.api.metadata.ModOrigin;
  * assets/ and data/ merged with the game's, everything else under eml-mods/<mod id>/ (see
  * loader/merge-assets.py). findPath() copies a file from there to the browser's game directory
  * (.eml-mods/<mod id>/<version>/...) the first time it's asked for, so mods can read it as a normal Path.
- * getRootPaths() is empty: the mod's files can be looked up but not listed.
+ * getRootPaths() is empty for most mods: their files can be looked up but not listed. A mod with files
+ * in folders (built-in resource packs, for example; merge-assets.py lists them in .eml-files) gets
+ * those unpacked there the first time it asks, and that folder as its root path, so Fabric can list
+ * and read them (ResourceLoader.registerBuiltinPack walks the root path).
  */
 public final class EmlModContainer implements ModContainer {
 	private final ModMetadata metadata;
@@ -33,7 +36,24 @@ public final class EmlModContainer implements ModContainer {
 	}
 
 	@Override public ModMetadata getMetadata() { return metadata; }
-	@Override public List<Path> getRootPaths() { return Collections.emptyList(); }
+	private List<Path> rootPaths;
+
+	@Override
+	public synchronized List<Path> getRootPaths() {
+		if (rootPaths == null) {
+			rootPaths = Collections.emptyList();
+			byte[] list = GeneratedMods.resource("eml-mods/" + metadata.getId() + "/.eml-files");
+			if (list != null) {
+				int missing = 0;
+				for (String name : new String(list, java.nio.charset.StandardCharsets.UTF_8).split("\n")) {
+					if (!name.isEmpty() && !findPath(name).isPresent()) missing++;
+				}
+				if (missing > 0) System.err.println("[eagler-modloader] " + missing + " files of " + metadata.getId() + " could not be unpacked");
+				rootPaths = Collections.singletonList(getRootPath());
+			}
+		}
+		return rootPaths;
+	}
 
 	@Override
 	public synchronized Optional<Path> findPath(String file) {

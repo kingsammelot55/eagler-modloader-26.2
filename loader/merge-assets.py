@@ -5,7 +5,8 @@ so they are packed into assets.epk with the vanilla files.
 Usage: merge-assets.py RESOURCES_DIR MOD_JAR...
 Mod files are layered over vanilla ones, like a mod resource pack sits above the vanilla pack.
 A mod's other files (its icon, config defaults and so on, but not classes) go to
-eml-mods/<mod id>/..., where the browser loader finds them for ModContainer.findPath().
+eml-mods/<mod id>/..., where the browser loader finds them for ModContainer.findPath(); the ones in
+folders are also listed in eml-mods/<mod id>/.eml-files, for ModContainer.getRootPaths().
 Language files, fonts, sounds.json, atlases and tags that already exist are combined with the
 mod's, as Minecraft does across resource and data packs (a mod's font file replacing the game's left
 every letter blank). Mods' META-INF/services files (Java ServiceLoader registrations) are merged into the game's, so the
@@ -101,6 +102,8 @@ def walk(zf, label, out, stats):
         elif mid and not n.endswith(".class") and not n.startswith("META-INF/") and ".." not in n.split("/"):
             dest = os.path.join(out, "eml-mods", mid, n)
             stats["own"] += 1
+            if "/" in n:
+                stats["folders"].setdefault(mid, set()).add(n)
         else:
             continue
         os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -109,10 +112,15 @@ def walk(zf, label, out, stats):
 
 def main():
     out = sys.argv[1]
-    stats = {"added": 0, "replaced": 0, "merged": 0, "own": 0, "services": 0}
+    stats = {"added": 0, "replaced": 0, "merged": 0, "own": 0, "services": 0, "folders": {}}
     for jar in sys.argv[2:]:
         with zipfile.ZipFile(jar) as zf:
             walk(zf, os.path.basename(jar), out, stats)
+    # The mods' own files in folders (built-in resource packs and the like), listed so the browser loader
+    # can unpack them and give the mod a real folder (ModContainer.getRootPaths(), see EmlModContainer).
+    for mid, names in stats["folders"].items():
+        with open(os.path.join(out, "eml-mods", mid, ".eml-files"), "w", encoding="utf-8") as f:
+            f.write("\n".join(sorted(names)) + "\n")
     print("[assets] %d mod files added, %d replaced, %d merged (fonts, language files, sounds, atlases, tags), %d other mod files, %d service registrations"
           % (stats["added"], stats["replaced"], stats["merged"], stats["own"], stats["services"]))
 
